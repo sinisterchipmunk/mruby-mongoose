@@ -6,7 +6,6 @@ class MongooseTest < MTest::Unit::TestCase
 
     mg.start_http 8184
     assert_equal true, mg.running_http?, 'should indicate http is running'
-    args_recvd = nil
     mg.on_http_request do |req|
       request = req
       ["HTTP/1.0 200 OK\r\n\r\n", req.body.read]
@@ -29,7 +28,6 @@ class MongooseTest < MTest::Unit::TestCase
   assert 'Mongoose http with IO in response' do
     mg = Mongoose.new
     mg.start_http 8185
-    args_recvd = nil
     file = File.open(File.join(File.dirname(__FILE__), "../.gitignore"), 'r')
     mg.on_http_request do |req|
       request = req
@@ -47,6 +45,27 @@ class MongooseTest < MTest::Unit::TestCase
            end
     assert_equal true, file.closed?,         'file should be closed'
     assert_equal true, !!resp.index("tmp/"), 'response should contain tmp/'
+  end
+
+  assert 'Mongoose http with a longer request body' do
+    mg = Mongoose.new
+    mg.start_http 8183
+    mg.on_http_request do |req|
+      request = req
+      ["HTTP/1.0 200 OK\r\n\r\n", req.body.read]
+    end
+
+    socket = TCPSocket.new('127.0.0.1', 8183)
+    message = "this is a test request " * 3
+    resp = begin
+             mg.poll(100) # unsure why necessary, must this happen between connect & write?
+             socket.write("POST / HTTP/1.1\r\nContent-length: #{message.length}\r\n\r\n#{message}")
+             3.times { mg.poll(100) }
+             socket.read
+           ensure
+             socket.close
+           end
+    assert_equal "HTTP/1.0 200 OK\r\n\r\n#{message}", resp
   end
 end
 

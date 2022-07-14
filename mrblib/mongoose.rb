@@ -21,7 +21,7 @@ class Mongoose
       @verb = verb.downcase
       @path = path
       @query_string = query_string.size == 0 ? nil : query_string
-      @body = body.size == 0 ? nil : body
+      @body = body
     end
   end
 

@@ -6,6 +6,7 @@ MRuby::Gem::Specification.new('mruby-mongoose') do |spec|
   spec.cc.include_paths << "#{spec.dir}/mongoose"
   spec.cc.include_paths << "#{File.dirname spec.dir}/mruby-polarssl/polarssl/include"
   spec.cc.include_paths << "#{spec.dir}/tmp/mruby/build/mrbgems/mruby-polarssl/polarssl/include"
+  spec.cc.include_paths << "#{spec.dir}/tmp/mruby/build/repos/host/mruby-polarssl/polarssl/include"
 
   # HACK deal with not having fseeko64 on android-23
   # spec.cc.flags << '-Dfseeko=fseeko -Dfseeko64=fseeko -D_FILE_OFFSET_BITS=32'
