@@ -9,7 +9,7 @@ if __FILE__ == $0
 
   Dir.mkdir 'tmp'  unless File.exist?('tmp')
   unless File.exist?(dir)
-    system "git clone #{repository} --branch 1.3.0 #{dir}"
+    system "git clone #{repository} --branch 2.1.2 #{dir}"
   end
 
   exit system(%Q[cd #{dir}; MRUBY_CONFIG=#{File.expand_path __FILE__} ruby minirake #{build_args.join(' ')}])
@@ -17,13 +17,9 @@ end
 
 MRuby::Build.new do |conf|
   toolchain :gcc
-  conf.gembox 'default'
-
+  conf.gembox 'full-core'
   conf.gem :git => 'git@github.com:ksss/mruby-stringio.git'
-  conf.gem :git => 'git@github.com:luisbebop/mruby-polarssl.git'
-  conf.gem :git => 'git@github.com:iij/mruby-io.git'
-  conf.gem :git => 'git@github.com:iij/mruby-pack.git'
-  conf.gem :git => 'git@github.com:iij/mruby-socket.git'
+  conf.gem :git => 'git@github.com:sinisterchipmunk/mruby-polarssl.git'
   conf.gem :git => 'git@github.com:iij/mruby-mtest.git'
 
   conf.gem File.expand_path(File.dirname(__FILE__))
