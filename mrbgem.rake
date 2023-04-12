@@ -21,5 +21,4 @@ MRuby::Gem::Specification.new('mruby-mongoose') do |spec|
   spec.add_dependency 'mruby-polarssl'
 
   spec.add_test_dependency 'mruby-socket'
-  spec.add_test_dependency 'mruby-mtest'
 end

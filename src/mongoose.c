@@ -104,12 +104,10 @@ static mrb_value mrb_mg_initialize(mrb_state *mrb, mrb_value self) {
     mrb_mg_free(mrb, wrapper);
   }
 
-  DATA_TYPE(self) = &mrb_mongoose_type;
-  DATA_PTR(self) = NULL;
-
   wrapper = mrb_malloc(mrb, sizeof(struct mgr_wrapper));
   memset(wrapper, 0, sizeof(struct mgr_wrapper));
   mg_mgr_init(&wrapper->mgr, NULL);
+  DATA_TYPE(self) = &mrb_mongoose_type;
   DATA_PTR(self) = wrapper;
   return self;
 }

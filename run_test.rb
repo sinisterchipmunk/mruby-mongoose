@@ -20,8 +20,6 @@ MRuby::Build.new do |conf|
   conf.gembox 'full-core'
   conf.gem :git => 'git@github.com:ksss/mruby-stringio.git'
   conf.gem :git => 'git@github.com:sinisterchipmunk/mruby-polarssl.git', branch: 'update-polarssl-2.24.0'
-  conf.gem :git => 'git@github.com:iij/mruby-mtest.git'
-
   conf.gem File.expand_path(File.dirname(__FILE__))
   conf.enable_test
   conf.enable_debug
