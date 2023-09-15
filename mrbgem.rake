@@ -18,7 +18,7 @@ MRuby::Gem::Specification.new('mruby-mongoose') do |spec|
 
   spec.add_dependency 'mruby-stringio'
   spec.add_dependency 'mruby-io'
-  spec.add_dependency 'mruby-polarssl'
+  spec.add_dependency 'mruby-polarssl', github: 'sinisterchipmunk/mruby-polarssl'
 
   spec.add_test_dependency 'mruby-socket'
 end
