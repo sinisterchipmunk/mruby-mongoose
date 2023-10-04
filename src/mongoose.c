@@ -12,65 +12,69 @@
 
 static mbedtls_entropy_context  entropy;
 static mbedtls_ctr_drbg_context ctr_drbg;
-static struct RClass *Connection = NULL;
 
-// During shutdown, mongoose may still have requests
-// to process, so we need to signal to ev_handler that it should terminate
-// requests because otherwise allocation of new objects on the stack can
-// lead to crashes.
-struct mgr_wrapper { struct mg_mgr mgr; int terminating; };
+#define mrb_cServer(mrb)     mrb_class_get_under(mrb, mrb_class_get(mrb, "Mongoose"), "Server")
+#define mrb_cConnection(mrb) mrb_class_get_under(mrb, mrb_class_get(mrb, "Mongoose"), "Connection")
 
 struct mrb_mg_context {
   mrb_state *mrb;
-  mrb_value self;
+  mrb_value mongoose;
+  mrb_value ssl_cert;
+  mrb_value ssl_key;
+  struct mg_connection *conn;
 };
 
 static void mrb_mg_free(mrb_state *mrb, void *in) {
-  struct mgr_wrapper *wrapper = in;
-  wrapper->terminating = true;
-  mg_mgr_free(&wrapper->mgr);
+  mg_mgr_free(in);
   mrb_free(mrb, in);
 }
 
-static void mrb_mg_conn_free(mrb_state *mrb, void *conn) {
+static void mrb_mg_conn_free(mrb_state *mrb, void *ctx) {
   (void) mrb;
-  (void) conn;
+  (void) ctx;
+}
+
+static void mrb_mg_ctx_free(mrb_state *mrb, void *c) {
+  struct mrb_mg_context *ctx = c;
+  if (!mrb_nil_p(ctx->ssl_key))  mrb_gc_unregister(mrb, ctx->ssl_key);
+  if (!mrb_nil_p(ctx->ssl_cert)) mrb_gc_unregister(mrb, ctx->ssl_cert);
+  mrb_free(mrb, c);
 }
 
 static struct mrb_data_type mrb_mongoose_type = { "Mongoose", mrb_mg_free };
 static struct mrb_data_type mrb_connection_type = { "Mongoose::Connection", mrb_mg_conn_free };
+static struct mrb_data_type mrb_mg_ctx_type = { "Mongoose::Server", mrb_mg_ctx_free };
 
 static void ev_handler(struct mg_connection *nc, int ev, void *ev_data, void *userarg) {
   struct mrb_mg_context *context = userarg;
   mrb_state *mrb = context->mrb;
-  mrb_value self = context->self;
+  mrb_value mongoose = context->mongoose;
   int ai = mrb_gc_arena_save(mrb);
 
   switch (ev) {
-    case MG_EV_HTTP_REQUEST: {
-      struct mgr_wrapper *wrapper = DATA_PTR(self);
-      // shutting down, don't talk to ruby
-      if (wrapper->terminating) {
-        mg_printf(nc, "HTTP/1.1 503 Gateway Unavailable\r\n\r\n503 Gateway Unavailable");
-        nc->flags |= MG_F_SEND_AND_CLOSE;
-        break;
+    case MG_EV_ACCEPT:
+      if (!mrb_nil_p(context->ssl_cert)) {
+        struct mg_tls_opts opts = {
+          // .ca = s_tls_ca,
+          .cert = RSTRING_PTR(context->ssl_cert),
+          .certkey = RSTRING_PTR(context->ssl_key)
+        };
+        mg_tls_init(nc, &opts);
       }
-
-      if (Connection == NULL) mrb_raise(mrb, E_RUNTIME_ERROR, "BUG: Connection is NULL");
-      struct http_message *req = (struct http_message *) ev_data;
-      mrb_value verb         = mrb_str_new(mrb, req->method.p,       req->method.len);
-      mrb_value body         = mrb_str_new(mrb, req->body.p,         req->body.len);
-      mrb_value path         = mrb_str_new(mrb, req->uri.p,          req->uri.len);
-      mrb_value query_string = mrb_str_new(mrb, req->query_string.p, req->query_string.len);
+      break;
+    case MG_EV_HTTP_MSG: {
+      struct mg_http_message *req = (struct mg_http_message *) ev_data;
+      mrb_value verb         = mrb_str_new(mrb, req->method.ptr, req->method.len);
+      mrb_value body         = mrb_str_new(mrb, req->body.ptr,   req->body.len);
+      mrb_value path         = mrb_str_new(mrb, req->uri.ptr,    req->uri.len);
+      mrb_value query_string = mrb_str_new(mrb, req->query.ptr,  req->query.len);
       mrb_value headers      = mrb_hash_new(mrb);
 
       // construct headers hash
-      for (int i = 0; i < MG_MAX_HTTP_HEADERS; i++) {
-        if (req->header_names[i].len > 0) {
-          mrb_value name  = mrb_str_new(mrb, req->header_names[i].p,  req->header_names[i].len);
-          mrb_value value = mrb_str_new(mrb, req->header_values[i].p, req->header_values[i].len);
-          mrb_hash_set(mrb, headers, name, value);
-        }
+      for (int i = 0; i < MG_MAX_HTTP_HEADERS && req->headers[i].name.len; i++) {
+        mrb_value name  = mrb_str_new(mrb, req->headers[i].name.ptr,  req->headers[i].name.len);
+        mrb_value value = mrb_str_new(mrb, req->headers[i].value.ptr, req->headers[i].value.len);
+        mrb_hash_set(mrb, headers, name, value);
       }
 
       // body should be an IO-like so that in the future if we want to handle
@@ -84,11 +88,10 @@ static void ev_handler(struct mg_connection *nc, int ev, void *ev_data, void *us
       // HACK because we don't support typical CGI env vars. Yet?
       char addr_header_value[100];
       memset(addr_header_value, 0, sizeof(addr_header_value));
-      mg_conn_addr_to_str(nc, addr_header_value, sizeof(addr_header_value),
-                          MG_SOCK_STRINGIFY_REMOTE | MG_SOCK_STRINGIFY_IP);
+      mg_snprintf(addr_header_value, sizeof(addr_header_value), "%M", mg_print_ip, &nc->rem);
       mrb_hash_set(mrb, headers, mrb_str_new_lit(mrb, "remote_addr"), mrb_str_new_cstr(mrb, addr_header_value));
-      struct RData *conn = mrb_data_object_alloc(mrb, Connection, nc, &mrb_connection_type);
-      mrb_funcall(mrb, self, "process_http_request", 6, mrb_obj_value(conn), headers, verb, path, query_string, body);
+      struct RData *conn = mrb_data_object_alloc(mrb, mrb_cConnection(mrb), nc, &mrb_connection_type);
+      mrb_funcall(mrb, mongoose, "process_http_request", 6, mrb_obj_value(conn), headers, verb, path, query_string, body);
       break;
     }
     default:
@@ -99,69 +102,69 @@ static void ev_handler(struct mg_connection *nc, int ev, void *ev_data, void *us
 }
 
 static mrb_value mrb_mg_initialize(mrb_state *mrb, mrb_value self) {
-  struct mgr_wrapper *wrapper = DATA_PTR(self);
-  if (wrapper) {
-    mrb_mg_free(mrb, wrapper);
-  }
+  struct mg_mgr *mgr = DATA_PTR(self);
+  if (mgr) mrb_mg_free(mrb, mgr);
 
-  wrapper = mrb_malloc(mrb, sizeof(struct mgr_wrapper));
-  memset(wrapper, 0, sizeof(struct mgr_wrapper));
-  mg_mgr_init(&wrapper->mgr, NULL);
+  mgr = mrb_malloc(mrb, sizeof(struct mg_mgr));
+  memset(mgr, 0, sizeof(struct mg_mgr));
+  mg_mgr_init(mgr);
   DATA_TYPE(self) = &mrb_mongoose_type;
-  DATA_PTR(self) = wrapper;
+  DATA_PTR(self) = mgr;
   return self;
 }
 
-static mrb_value mrb_mg_start_common(mrb_state *mrb, mrb_value self, mrb_int port, struct mg_bind_opts bind_opts) {
-  char port_str[6];
-  // FIXME free context on shutdown
-  struct mrb_mg_context *context = malloc(sizeof(struct mrb_mg_context));
-  sprintf(port_str, "%hu", (unsigned short) port);
-  context->mrb = mrb;
-  context->self = self;
-  struct mg_connection *conn = mg_bind_opt(&((struct mgr_wrapper *)DATA_PTR(self))->mgr, port_str, ev_handler, context, bind_opts);
-  struct RData *rconn = mrb_data_object_alloc(mrb, Connection, conn, &mrb_connection_type);
-  if (conn) {
-    mg_set_protocol_http_websocket(conn);
-  } else {
-    if (bind_opts.error_string) {
-      mrb_raisef(mrb, E_RUNTIME_ERROR, "could not bind server to port %s: %s", port_str, *(bind_opts.error_string));
-    } else {
-      mrb_raisef(mrb, E_RUNTIME_ERROR, "could not bind server to port %s: no reason given", port_str);
-    }
-  }
-  return mrb_obj_value(rconn);
-}
-
 static mrb_value mrb_mg_start_https(mrb_state *mrb, mrb_value self) {
-  const char *ssl_key_file, *ssl_cert_file;
+  mrb_value ssl_key = mrb_nil_value(), ssl_cert = mrb_nil_value();
   mrb_int port;
-  struct mg_bind_opts bind_opts;
-  mrb_get_args(mrb, "zzi", &ssl_key_file, &ssl_cert_file, &port);
-  memset(&bind_opts, 0, sizeof(bind_opts));
-  bind_opts.ssl_cert = ssl_cert_file;
-  bind_opts.ssl_key  = ssl_key_file;
-  mrb_iv_set(mrb, self, mrb_intern_lit(mrb, "@https"), mrb_mg_start_common(mrb, self, port, bind_opts));
+  mrb_get_args(mrb, "SSi", &ssl_key, &ssl_cert, &port);
+  mrb_value url = mrb_str_new_lit(mrb, "https://0.0.0.0");
+  mrb_str_cat_lit(mrb, url, ":");
+  mrb_str_cat_str(mrb, url, mrb_funcall(mrb, mrb_fixnum_value(port), "to_s", 0));
+
+  // don't gc these until we are done with them (see mrb_mg_ctx_free()).
+  mrb_gc_register(mrb, ssl_key);
+  mrb_gc_register(mrb, ssl_cert);
+
+  struct mrb_mg_context *context = mrb_malloc(mrb, sizeof(struct mrb_mg_context));
+  context->mrb = mrb;
+  context->mongoose = self;
+  context->ssl_key = ssl_key;
+  context->ssl_cert = ssl_cert;
+  context->conn = mg_http_listen(DATA_PTR(self), RSTRING_PTR(url), ev_handler, context);
+  if (!context->conn)
+    mrb_raisef(mrb, E_RUNTIME_ERROR, "could not bind HTTPS server to port %d", port);
+
+  struct RData *rconn = mrb_data_object_alloc(mrb, mrb_cServer(mrb), context, &mrb_mg_ctx_type);
+  mrb_iv_set(mrb, self, mrb_intern_lit(mrb, "@https"), mrb_obj_value(rconn));
   return self;
 }
 
 static mrb_value mrb_mg_start_http(mrb_state *mrb, mrb_value self) {
   mrb_int port;
-  struct mg_bind_opts bind_opts;
   mrb_get_args(mrb, "i", &port);
-  memset(&bind_opts, 0, sizeof(bind_opts));
-  mrb_iv_set(mrb, self, mrb_intern_lit(mrb, "@http"), mrb_mg_start_common(mrb, self, port, bind_opts));
+  mrb_value url = mrb_str_new_lit(mrb, "http://0.0.0.0");
+  mrb_str_cat_lit(mrb, url, ":");
+  mrb_str_cat_str(mrb, url, mrb_funcall(mrb, mrb_fixnum_value(port), "to_s", 0));
+
+  struct mrb_mg_context *context = mrb_malloc(mrb, sizeof(struct mrb_mg_context));
+  context->mrb = mrb;
+  context->mongoose = self;
+  context->ssl_key = mrb_nil_value();
+  context->ssl_cert = mrb_nil_value();
+  context->conn = mg_http_listen(DATA_PTR(self), RSTRING_PTR(url), ev_handler, context);
+  if (!context->conn)
+    mrb_raisef(mrb, E_RUNTIME_ERROR, "could not bind HTTP server to port %d", port);
+ 
+  struct RData *rconn = mrb_data_object_alloc(mrb, mrb_cServer(mrb), context, &mrb_mg_ctx_type);
+  mrb_iv_set(mrb, self, mrb_intern_lit(mrb, "@http"), mrb_obj_value(rconn));
   return self;
 }
 
 static mrb_value mrb_mg_stop_common(mrb_state *mrb, mrb_value self, const char *ivar_name) {
   mrb_sym ivar_sym = mrb_intern_cstr(mrb, ivar_name);
-  mrb_value conn = mrb_iv_get(mrb, self, ivar_sym);
-  if (!mrb_nil_p(conn)) {
-    if (DATA_PTR(conn)) {
-      ((struct mg_connection *) DATA_PTR(conn))->flags |= MG_F_CLOSE_IMMEDIATELY;
-      DATA_PTR(conn) = NULL;
-    }
+  mrb_value server = mrb_iv_get(mrb, self, ivar_sym);
+  if (!mrb_nil_p(server)) {
+    mrb_funcall(mrb, server, "stop", 0);
     mrb_iv_set(mrb, self, ivar_sym, mrb_nil_value());
     mrb_funcall(mrb, self, "poll", 1, mrb_fixnum_value(0)); // trigger close conn
   }
@@ -183,20 +186,27 @@ static mrb_value mrb_mg_poll(mrb_state *mrb, mrb_value self) {
   return self;
 }
 
+static mrb_value mrb_mg_server_stop(mrb_state *mrb, mrb_value self) {
+  (void) mrb;
+  struct mrb_mg_context *ctx = DATA_PTR(self);
+  ctx->conn->is_closing = 1;
+  return mrb_nil_value();
+}
+
 static mrb_value mrb_mg_conn_write(mrb_state *mrb, mrb_value self) {
   struct mg_connection *nc = DATA_PTR(self);
   if (!nc) mrb_raisef(mrb, E_RUNTIME_ERROR, "BUG: Connection is nil");
   const char *data;
   mrb_int size;
   mrb_get_args(mrb, "s", &data, &size);
-  int rc = mg_printf(nc, "%.*s", (int) size, data);
+  int rc = mg_send(nc, data, size); // mg_printf(nc, "%.*s", (int) size, data);
   return mrb_fixnum_value((mrb_int) rc);
 }
 
 static mrb_value mrb_mg_conn_close(mrb_state *mrb, mrb_value self) {
   struct mg_connection *nc = DATA_PTR(self);
   if (!nc) mrb_raisef(mrb, E_RUNTIME_ERROR, "BUG: Connection is nil");
-  nc->flags |= MG_F_SEND_AND_CLOSE;
+  nc->is_draining = 1;
   return mrb_nil_value();
 }
 
@@ -227,10 +237,14 @@ void mrb_mruby_mongoose_gem_init(mrb_state *mrb) {
   mrb_define_method(mrb, Mongoose, "stop_https",  mrb_mg_stop_https,  MRB_ARGS_NONE());
   mrb_define_method(mrb, Mongoose, "poll",        mrb_mg_poll,        MRB_ARGS_REQ(1));
 
-  Connection = mrb_define_class_under(mrb, Mongoose, "Connection", mrb->object_class);
+  struct RClass *Server = mrb_define_class_under(mrb, Mongoose, "Server", mrb->object_class);
+  MRB_SET_INSTANCE_TT(Server, MRB_TT_DATA);
+  mrb_define_method(mrb, Server,   "stop",        mrb_mg_server_stop, MRB_ARGS_NONE());
+
+  struct RClass *Connection = mrb_define_class_under(mrb, Mongoose, "Connection", mrb->object_class);
   MRB_SET_INSTANCE_TT(Connection, MRB_TT_DATA);
-  mrb_define_method(mrb, Connection, "write",       mrb_mg_conn_write,       MRB_ARGS_REQ(1));
-  mrb_define_method(mrb, Connection, "close",       mrb_mg_conn_close,       MRB_ARGS_NONE());
+  mrb_define_method(mrb, Connection, "write",     mrb_mg_conn_write,  MRB_ARGS_REQ(1));
+  mrb_define_method(mrb, Connection, "close",     mrb_mg_conn_close,  MRB_ARGS_NONE());
 }
 
 void mrb_mruby_mongoose_gem_final(mrb_state *mrb) {
