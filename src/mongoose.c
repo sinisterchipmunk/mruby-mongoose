@@ -24,26 +24,35 @@ struct mrb_mg_context {
   struct mg_connection *conn;
 };
 
+struct mrb_mg_mgr_wrapper {
+  struct mg_mgr mgr;
+  struct mrb_mg_context http_context;
+  struct mrb_mg_context https_context;
+};
+
+static void mrb_mg_ctx_free(mrb_state *mrb, struct mrb_mg_context *ctx) {
+  if (!mrb_nil_p(ctx->ssl_key))   mrb_gc_unregister(mrb, ctx->ssl_key);
+  if (!mrb_nil_p(ctx->ssl_cert))  mrb_gc_unregister(mrb, ctx->ssl_cert);
+  ctx->ssl_key  = mrb_nil_value();
+  ctx->ssl_cert = mrb_nil_value();
+}
+
 static void mrb_mg_free(mrb_state *mrb, void *in) {
-  mg_mgr_free(in);
+  struct mrb_mg_mgr_wrapper *mgr = in;
+  mg_mgr_free(&mgr->mgr);
+  mrb_mg_ctx_free(mrb, &mgr->http_context);
+  mrb_mg_ctx_free(mrb, &mgr->https_context);
   mrb_free(mrb, in);
 }
 
-static void mrb_mg_conn_free(mrb_state *mrb, void *ctx) {
+static void mrb_free_noop(mrb_state *mrb, void *ctx) {
   (void) mrb;
   (void) ctx;
 }
 
-static void mrb_mg_ctx_free(mrb_state *mrb, void *c) {
-  struct mrb_mg_context *ctx = c;
-  if (!mrb_nil_p(ctx->ssl_key))  mrb_gc_unregister(mrb, ctx->ssl_key);
-  if (!mrb_nil_p(ctx->ssl_cert)) mrb_gc_unregister(mrb, ctx->ssl_cert);
-  mrb_free(mrb, c);
-}
-
-static struct mrb_data_type mrb_mongoose_type = { "Mongoose", mrb_mg_free };
-static struct mrb_data_type mrb_connection_type = { "Mongoose::Connection", mrb_mg_conn_free };
-static struct mrb_data_type mrb_mg_ctx_type = { "Mongoose::Server", mrb_mg_ctx_free };
+static struct mrb_data_type mrb_mongoose_type   = { "Mongoose",             mrb_mg_free   };
+static struct mrb_data_type mrb_connection_type = { "Mongoose::Connection", mrb_free_noop };
+static struct mrb_data_type mrb_mg_ctx_type     = { "Mongoose::Server",     mrb_free_noop };
 
 static void ev_handler(struct mg_connection *nc, int ev, void *ev_data, void *userarg) {
   struct mrb_mg_context *context = userarg;
@@ -102,18 +111,19 @@ static void ev_handler(struct mg_connection *nc, int ev, void *ev_data, void *us
 }
 
 static mrb_value mrb_mg_initialize(mrb_state *mrb, mrb_value self) {
-  struct mg_mgr *mgr = DATA_PTR(self);
-  if (mgr) mrb_mg_free(mrb, mgr);
+  struct mrb_mg_mgr_wrapper *mgr = DATA_PTR(self);
+  if (mgr) mrb_mg_free(mrb, &mgr->mgr);
 
-  mgr = mrb_malloc(mrb, sizeof(struct mg_mgr));
-  memset(mgr, 0, sizeof(struct mg_mgr));
-  mg_mgr_init(mgr);
+  mgr = mrb_malloc(mrb, sizeof(struct mrb_mg_mgr_wrapper));
+  memset(mgr, 0, sizeof(struct mrb_mg_mgr_wrapper));
+  mg_mgr_init(&mgr->mgr);
   DATA_TYPE(self) = &mrb_mongoose_type;
   DATA_PTR(self) = mgr;
   return self;
 }
 
 static mrb_value mrb_mg_start_https(mrb_state *mrb, mrb_value self) {
+  struct mrb_mg_mgr_wrapper *mgr = DATA_PTR(self);
   mrb_value ssl_key = mrb_nil_value(), ssl_cert = mrb_nil_value();
   mrb_int port;
   mrb_get_args(mrb, "SSi", &ssl_key, &ssl_cert, &port);
@@ -121,41 +131,49 @@ static mrb_value mrb_mg_start_https(mrb_state *mrb, mrb_value self) {
   mrb_str_cat_lit(mrb, url, ":");
   mrb_str_cat_str(mrb, url, mrb_funcall(mrb, mrb_fixnum_value(port), "to_s", 0));
 
+  if (!mrb_nil_p(mrb_iv_get(mrb, self, mrb_intern_lit(mrb, "@https")))) {
+    // TODO multiple servers across different ports??
+    mrb_raise(mrb, E_ARGUMENT_ERROR, "an HTTPS server is already running");
+  }
+
   // don't gc these until we are done with them (see mrb_mg_ctx_free()).
   mrb_gc_register(mrb, ssl_key);
   mrb_gc_register(mrb, ssl_cert);
 
-  struct mrb_mg_context *context = mrb_malloc(mrb, sizeof(struct mrb_mg_context));
-  context->mrb = mrb;
-  context->mongoose = self;
-  context->ssl_key = ssl_key;
-  context->ssl_cert = ssl_cert;
-  context->conn = mg_http_listen(DATA_PTR(self), RSTRING_PTR(url), ev_handler, context);
-  if (!context->conn)
+  mgr->https_context.mrb = mrb;
+  mgr->https_context.mongoose = self;
+  mgr->https_context.ssl_key  = ssl_key;
+  mgr->https_context.ssl_cert = ssl_cert;
+  mgr->https_context.conn = mg_http_listen(&mgr->mgr, RSTRING_PTR(url), ev_handler, &mgr->https_context);
+  if (!mgr->https_context.conn)
     mrb_raisef(mrb, E_RUNTIME_ERROR, "could not bind HTTPS server to port %d", port);
 
-  struct RData *rconn = mrb_data_object_alloc(mrb, mrb_cServer(mrb), context, &mrb_mg_ctx_type);
+  struct RData *rconn = mrb_data_object_alloc(mrb, mrb_cServer(mrb), &mgr->https_context, &mrb_mg_ctx_type);
   mrb_iv_set(mrb, self, mrb_intern_lit(mrb, "@https"), mrb_obj_value(rconn));
   return self;
 }
 
 static mrb_value mrb_mg_start_http(mrb_state *mrb, mrb_value self) {
+  struct mrb_mg_mgr_wrapper *mgr = DATA_PTR(self);
   mrb_int port;
   mrb_get_args(mrb, "i", &port);
   mrb_value url = mrb_str_new_lit(mrb, "http://0.0.0.0");
   mrb_str_cat_lit(mrb, url, ":");
   mrb_str_cat_str(mrb, url, mrb_funcall(mrb, mrb_fixnum_value(port), "to_s", 0));
 
-  struct mrb_mg_context *context = mrb_malloc(mrb, sizeof(struct mrb_mg_context));
-  context->mrb = mrb;
-  context->mongoose = self;
-  context->ssl_key = mrb_nil_value();
-  context->ssl_cert = mrb_nil_value();
-  context->conn = mg_http_listen(DATA_PTR(self), RSTRING_PTR(url), ev_handler, context);
-  if (!context->conn)
+  if (!mrb_nil_p(mrb_iv_get(mrb, self, mrb_intern_lit(mrb, "@http")))) {
+    // TODO multiple servers across different ports??
+    mrb_raise(mrb, E_ARGUMENT_ERROR, "an HTTP server is already running");
+  }
+  mgr->http_context.mrb = mrb;
+  mgr->http_context.mongoose = self;
+  mgr->http_context.ssl_key  = mrb_nil_value();
+  mgr->http_context.ssl_cert = mrb_nil_value();
+  mgr->http_context.conn = mg_http_listen(&mgr->mgr, RSTRING_PTR(url), ev_handler, &mgr->http_context);
+  if (!mgr->http_context.conn)
     mrb_raisef(mrb, E_RUNTIME_ERROR, "could not bind HTTP server to port %d", port);
  
-  struct RData *rconn = mrb_data_object_alloc(mrb, mrb_cServer(mrb), context, &mrb_mg_ctx_type);
+  struct RData *rconn = mrb_data_object_alloc(mrb, mrb_cServer(mrb), &mgr->http_context, &mrb_mg_ctx_type);
   mrb_iv_set(mrb, self, mrb_intern_lit(mrb, "@http"), mrb_obj_value(rconn));
   return self;
 }
@@ -167,6 +185,8 @@ static mrb_value mrb_mg_stop_common(mrb_state *mrb, mrb_value self, const char *
     mrb_funcall(mrb, server, "stop", 0);
     mrb_iv_set(mrb, self, ivar_sym, mrb_nil_value());
     mrb_funcall(mrb, self, "poll", 1, mrb_fixnum_value(0)); // trigger close conn
+    mrb_mg_ctx_free(mrb, DATA_PTR(server));
+    mrb_iv_set(mrb, self, ivar_sym, mrb_nil_value());
   }
   return self;
 }
@@ -180,9 +200,10 @@ static mrb_value mrb_mg_stop_http(mrb_state *mrb, mrb_value self) {
 }
 
 static mrb_value mrb_mg_poll(mrb_state *mrb, mrb_value self) {
+  struct mrb_mg_mgr_wrapper *mgr = DATA_PTR(self);
   mrb_int timeout_ms;
   mrb_get_args(mrb, "i", &timeout_ms);
-  mg_mgr_poll(DATA_PTR(self), (int) timeout_ms);
+  mg_mgr_poll(&mgr->mgr, (int) timeout_ms);
   return self;
 }
 
