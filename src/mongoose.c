@@ -101,6 +101,7 @@ static void ev_handler(struct mg_connection *nc, int ev, void *ev_data, void *us
       mrb_hash_set(mrb, headers, mrb_str_new_lit(mrb, "remote_addr"), mrb_str_new_cstr(mrb, addr_header_value));
       struct RData *conn = mrb_data_object_alloc(mrb, mrb_cConnection(mrb), nc, &mrb_connection_type);
       mrb_funcall(mrb, mongoose, "process_http_request", 6, mrb_obj_value(conn), headers, verb, path, query_string, body);
+      nc->is_resp = 0;  // process further msgs in keep-alive connection
       break;
     }
     default:

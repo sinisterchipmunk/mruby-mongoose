@@ -14,7 +14,7 @@ assert 'Mongoose http connection' do
            mg.poll(100) # unsure why necessary, must this happen between connect & write?
            socket.write("GET / HTTP/1.1\r\nContent-Length: 5\r\n\r\nHello")
            3.times { mg.poll(100) }
-           socket.read
+           socket.sysread(1024)
          ensure
            socket.close
          end
@@ -38,7 +38,7 @@ assert 'Mongoose http with IO in response' do
            mg.poll(100) # unsure why necessary, must this happen between connect & write?
            socket.write("GET / HTTP/1.1\r\n\r\n")
            3.times { mg.poll(100) }
-           socket.read
+           socket.sysread(1024)
          ensure
            socket.close
          end
@@ -60,9 +60,37 @@ assert 'Mongoose http with a longer request body' do
            mg.poll(100) # unsure why necessary, must this happen between connect & write?
            socket.write("POST / HTTP/1.1\r\nContent-length: #{message.length}\r\n\r\n#{message}")
            3.times { mg.poll(100) }
-           socket.read
+           socket.sysread(1024)
          ensure
            socket.close
          end
   assert_equal "HTTP/1.0 200 OK\r\n\r\n#{message}", resp
+end
+
+assert 'HTTP keep-alive' do
+  mg = Mongoose.new
+  mg.start_http 8186
+  mg.on_http_request do |req|
+    request = req
+    ["HTTP/1.0 200 OK\r\n\r\n", req.body.read]
+  end
+
+  socket = TCPSocket.new('127.0.0.1', 8186)
+  begin
+    req = "GET / HTTP/1.1\r\nConnection: keep-alive\r\n\r\n"
+    mg.poll(100) # unsure why necessary, must this happen between connect & write?
+    socket.write(req)
+    3.times { mg.poll(100) }
+    msg1 = ''
+    msg1 << socket.sysread(1024)
+    assert_equal "HTTP/1.0 200 OK\r\n\r\n", msg1
+
+    socket.write(req)
+    3.times { mg.poll(100) }
+    msg2 = ''
+    msg2 << socket.sysread(1024)# until socket.eof? || msg2["\r\n\r\n"]
+    assert_equal "HTTP/1.0 200 OK\r\n\r\n", msg2
+  ensure
+    socket.close
+  end
 end

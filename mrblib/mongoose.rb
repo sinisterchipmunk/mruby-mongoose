@@ -56,6 +56,5 @@ class Mongoose
         conn.write part
       end
     end
-    conn.close
   end
 end
