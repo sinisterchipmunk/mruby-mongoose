@@ -1,6 +1,9 @@
 class Mongoose
   VERSION = '0.0.1'
 
+  class Error < RuntimeError; end
+  class BindError < Error; end
+
   class Connection
     @@next_id = 1
 

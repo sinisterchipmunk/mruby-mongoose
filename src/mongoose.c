@@ -147,7 +147,8 @@ static mrb_value mrb_mg_start_https(mrb_state *mrb, mrb_value self) {
   mgr->https_context.ssl_cert = ssl_cert;
   mgr->https_context.conn = mg_http_listen(&mgr->mgr, RSTRING_PTR(url), ev_handler, &mgr->https_context);
   if (!mgr->https_context.conn)
-    mrb_raisef(mrb, E_RUNTIME_ERROR, "could not bind HTTPS server to port %d", port);
+    mrb_raisef(mrb, mrb_class_get_under(mrb, mrb_class_get(mrb, "Mongoose"), "BindError"),
+               "could not bind HTTPS server to port %d", port);
 
   struct RData *rconn = mrb_data_object_alloc(mrb, mrb_cServer(mrb), &mgr->https_context, &mrb_mg_ctx_type);
   mrb_iv_set(mrb, self, mrb_intern_lit(mrb, "@https"), mrb_obj_value(rconn));
@@ -172,7 +173,8 @@ static mrb_value mrb_mg_start_http(mrb_state *mrb, mrb_value self) {
   mgr->http_context.ssl_cert = mrb_nil_value();
   mgr->http_context.conn = mg_http_listen(&mgr->mgr, RSTRING_PTR(url), ev_handler, &mgr->http_context);
   if (!mgr->http_context.conn)
-    mrb_raisef(mrb, E_RUNTIME_ERROR, "could not bind HTTP server to port %d", port);
+    mrb_raisef(mrb, mrb_class_get_under(mrb, mrb_class_get(mrb, "Mongoose"), "BindError"),
+               "could not bind HTTP server to port %d", port);
  
   struct RData *rconn = mrb_data_object_alloc(mrb, mrb_cServer(mrb), &mgr->http_context, &mrb_mg_ctx_type);
   mrb_iv_set(mrb, self, mrb_intern_lit(mrb, "@http"), mrb_obj_value(rconn));
